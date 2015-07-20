@@ -1,0 +1,29 @@
+Details about the RS232 driver circuit
+--Written 20-07-2015 by Oliver Kesterton
+
+
+The circuit was designed to allow an Arduino to control a Roland MDX-20 Modela CNC mill.
+
+The circuit contains a MAX233 driver IC, and breaks out the TX, RX, RTS and CTS lines, enabling hardware flow control.
+
+Header connections: Board layout:
+
+	 _______________________________________________
+	|						|
+A	|						|
+r	|						|	     
+d	|  RX                          	    	GND     |	Serial
+u	|  TX            			RX	|	Connector
+i	|  RTS				   	TX	|
+n	|  CTS			           	RTS	|
+o	|  +5V				   	CTS	|
+	|  GND						|
+	|						|
+	|_______________________________________________|
+
+The system has been tested with an Arduino Mega with SD shield. It may work with other Arduino boards, but they will require at least
+two serial ports. The MAX233 with 3.3V logic is untested.   
+
+The Arduino program will make RTS (ready to send) high constantly, and will only send serial data when CTS (clear to send) is high.
+Data is read from the SD card. Currently it looks for a file named "file.txt", but it should be relatively simple to modify the program
+to ask for a filename, enabling any file to be read and sent. 

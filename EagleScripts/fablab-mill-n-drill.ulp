@@ -1,0 +1,908 @@
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+// Mill & Drill single layer boards with the FabLab
+// by Marc Boon <marc@marcboon.com>
+//
+// Version history:
+//
+// 2008.02.10 - added layer selection (1 or 16)
+// 2008.02.03 - original release
+//
+// Based on:
+// - millsw02.ulp by Werner Schattmann,
+// - mill_me4-2.ulp by Stefan Auchter,
+// - ex-dialogs.ulp and ex-run-script.ulp by CadSoft
+//
+// Use with:
+// - fablab-mill-n-drill.cam for output to Roland Modela MDX-20 milling machine
+//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+// Output Milling Countours for CNC machines by Rudi Hofer, CadSoft, 1998
+//
+// Changed 23.02.2001 by Schattmann Werner, EMail: Schattmann@hotmail.com
+//
+// - Updated to run under Eagle V4.01
+// - all type of pad and via shapes included
+// - wires are connected like in eagle
+// - algorithm improved
+//   to prevent unneccessary pen up and down moves of the CNC machine
+//
+// - This revision does not generate a milling shape for the Signal "GND", so that
+//   this signal is "flood filling" the board.
+//   But this feature can easily be changed in function select_signal.
+//
+// 1. Set path for script files to your design path for the board to be milled.
+//
+// 2. Adjust the parameters below to your needs.
+//
+// 3. Load your pc board into the layout editor.
+//    Make sure, you have run a DRC with min. distance of milling diameter between signals.
+//    Only objects belonging to signals (except polygons) are taken for milling shape.
+//
+// 4. Run this ULP (RUN MILLSW02.ULP).
+//
+// 5. Execute script files MILLTOP.SCR (for top side of pc board) and MILLBOT.SCR
+//    for bottom side of pc board. You can edit the shapes or add texts etc.
+//
+// 6. Generate milling files for top and bottom sides with CAM Processor
+//    (only tMill layer or bMill layer activated).
+//    Choose HPGL driver if your CNC machine understands this format.
+//    In case your CNC machine understands a proprietary format, define a new driver
+//    in EAGLE.DEF or contact CadSoft <support@cadsoft.de> for help.
+//
+//    Restrictions:
+//    Polygons are not supported.
+//////////////////////////////////////////////////////////////////////////////////////////
+
+//    Get working directory
+
+string dir;
+if(board) {
+  board(B) {
+    int pos = strrchr(B.name, '/');
+    if(pos >= 0) {
+      dir = strsub(B.name, 0, pos + 1);
+    }
+  }
+}
+else {
+   dlgMessageBox("Start this ULP in a board");
+   exit(0);
+}
+
+//    User specific adjustments
+
+real
+      milldia   = 0.6,     // (mm) diameter of milling tool
+      millspace = 0.0024,  // (mm) additional spacing - milling tool to wire
+      wire_width = 0.01;   // (mm) width for the wires used for the "dots" of the drilling holes   
+
+//    milldia   = 0.0,     // use for test only
+//    millspace = 0.0;
+
+string
+      plane_name = "GND",              // name of signal connected to copper plane
+      milltop_scr = dir + "milltop.scr",     // Script file name top layer
+      millbot_scr = dir + "millbot.scr",     // Script file name bottom layer
+      milldrill_scr = dir + "milldrill.scr"; // Script file name milled drill layer
+
+int
+      layer = 16,           // default layer is bottom layer
+      millholes = 0,        // if != 0, holes larger than milldia are milled 
+      milling_layer = 46,   // layer for milling contours
+      milldrill_layer = 45; // layer for milling drills
+
+// Selects Signals for milling
+// return: 1 = Mill signal, 0 = don't mill signal
+int select_signal (string s_name)  {
+   return s_name != plane_name;  // or e.g. 1 or S.name != "GND" or S.name == "N$22" or ....
+  }
+
+
+//    Interactive user input of tool diameter and options
+
+int Result = dlgDialog("FabLab Mill & Drill"){
+
+string msg1, msg2;
+  sprintf(msg1, "Contouring layer %d to layer %d.\nDrilling/milling holes to layer %d.",
+    layer, milling_layer, milldrill_layer),
+  sprintf(msg2, "Make sure layers %d-%d are empty!", milling_layer, milldrill_layer);
+
+  dlgVBoxLayout {
+    dlgSpacing(10);
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel(msg1);
+      dlgStretch(1);
+    }
+    dlgSpacing(2);
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel(msg2);
+      dlgStretch(1);
+    }
+    dlgSpacing(10);
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel("Layer to mill (1 or 16):");
+      dlgSpacing(39);
+      dlgStretch(0);
+      dlgIntEdit(layer, 1, 16);
+      dlgStretch(1);
+    }
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel("Tool diameter (0.1 - 1.0 mm):");
+      dlgSpacing(5);
+      dlgStretch(0);
+      dlgRealEdit(milldia, 0.1, 1.0);
+      dlgStretch(1);
+    }
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel("Signal in copper plane:");
+      dlgSpacing(31);
+      dlgStretch(0);
+      dlgStringEdit(plane_name);
+      dlgStretch(1);
+    }
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgLabel("Mill larger holes to their size:");
+      dlgSpacing(8);
+      dlgStretch(0);
+      dlgCheckBox("", millholes);
+      dlgStretch(1);
+    }
+    dlgSpacing(10);
+    dlgHBoxLayout {
+      dlgStretch(0);
+      dlgPushButton("+OK") dlgAccept();
+      dlgStretch(0);
+      dlgPushButton("-Cancel") dlgReject();
+      dlgStretch(0);
+    }
+  }
+};
+if (Result == 0) exit (0);
+
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//    Algorithm
+// 1. Get objects as polygons, enlarged by 1/2 milling diameter
+// 2. Calculate interceptions of all edges
+// 3. Find out which sections are outside any polygon and draw them
+//////////////////////////////////////////////////////////////////////////////////////////
+
+int
+    i1, i2,                            // Index to wires 1 and 2 of interception test
+    j,                                 // Current polygon number in mill proc.
+    snum,                              // Number of interceptions in Sx,y
+    wnum,                              // Number of wire segments Wx,y
+    pnum,                              // Number of polygons in Wx,y
+    anum,                              // Number of all wires
+    px[],                              // Polygon number of wires in Wx,y
+    IWx1[], IWy1[], IWx2[], IWy2[],    // Wire segments rounded to integer
+    ISx[], ISy[],                      // Interceptions calculated by proc. cross in integer
+    Ihx[], Ihy[],                      // Ordered interceptions in integer
+    IAx1[], IAy1[], IAx2[], IAy2[],    // All wires of a signal with begin and end in integer
+    kx[];                              // Wire number for segments in Ax,Ay
+
+real
+    eta         = 0.000003125,              // Eagle resolution in mm
+    eta_cmp     = eta / 4.0,           // Resolution / 4
+    arc_cmp     = 0.1 * (PI / 180.0),  // Wires are parallel within 0.1 degrees
+    tan_pi_8    = tan(PI / 8.0),       // for Octagon
+    tan_pi_16   = tan(PI / 16.0),      // for 16 seg circle
+    cos_pi_16   = cos(PI / 16.0),      // for 16 seg circle
+    sin_pi_3_16 = sin(PI*3.0 / 16.0),  // for 16 seg circle
+    cos_pi_3_16 = cos(PI*3.0 / 16.0),  // for 16 seg circle
+    milldist,                          // Distance to wire of mill
+    Wx1[], Wy1[], Wx2[], Wy2[],        // Wire segments: begin to end
+    Cosa[], Sina[], Pd[],              // Hesse Normal Form of all wires
+    Sx[], Sy[],                        // Interceptions calculated by proc. cross
+    hx[], hy[];                        // Ordered interceptions
+
+
+// Calculate for all wires hesse normal form and round edges to integer
+void hesse (void)  {
+  int i;
+  real a, b, normf;
+
+  for (i = 0; i < wnum; i++)  {   // For all wires
+    IWx1[i] = round(Wx1[i] / eta);   IWy1[i] = round(Wy1[i] / eta);  // Round to integer
+    IWx2[i] = round(Wx2[i] / eta);   IWy2[i] = round(Wy2[i] / eta);  // for faster calc.
+
+    a = Wy1[i] - Wy2[i];          // Standard form
+    b = Wx2[i] - Wx1[i];
+    normf = sqrt(a * a + b * b);  // Norm Factor
+
+    Cosa[i] = a / normf;          // Hesse form
+    Sina[i] = b / normf;
+    Pd[i]   = (Wx1[i] * Wy2[i] - Wx2[i] * Wy1[i]) / normf;
+    }
+  }
+
+
+// Calculate interception of to wires
+// ux1,uy1,ux2,uy2: wire 1
+// vx1,vy1,vx2,vy2: wire 2
+// Result: Sx, Sy - coordinates of interception point
+//         snum     Number of interceptions in Sx,y
+void cross (void)  {
+  real dv,        // Matrix divisor
+       xs, ys;    // Interception of the wires
+  int  ixs, iys;  // -"- as rounded to integer
+
+  dv = Cosa[i1] * Sina[i2] - Cosa[i2] * Sina[i1];  // Matrix Divisor
+
+  if (abs(dv) >= arc_cmp)  {  // Not Parallel ? Check arc using small arcs ~= sin(arc)
+    xs  = (Sina[i1] * Pd[i2] - Sina[i2] * Pd[i1]) / dv;  // Calculate cross point
+    ys  = (Cosa[i2] * Pd[i1] - Cosa[i1] * Pd[i2]) / dv;
+    ixs = round(xs / eta);
+    iys = round(ys / eta);
+
+    if (min(IWx1[i1], IWx2[i1]) <= ixs && ixs <= max(IWx1[i1], IWx2[i1]) &&
+        min(IWy1[i1], IWy2[i1]) <= iys && iys <= max(IWy1[i1], IWy2[i1]) &&
+        min(IWx1[i2], IWx2[i2]) <= ixs && ixs <= max(IWx1[i2], IWx2[i2]) &&
+        min(IWy1[i2], IWy2[i2]) <= iys && iys <= max(IWy1[i2], IWy2[i2]))  {  // range ok ?
+      Sx[snum]  = xs;   Sy[snum]  = ys;     // Save interception
+      ISx[snum] = ixs;  ISy[snum++] = iys;  // -"- and next index
+      }
+    }
+  }
+
+
+// Order interceptions
+// Return: Index of last interception inclusive wire begin and end
+// Result: hx,y with ordered interceptions inclusive Wx1,Wy1 and Wx2,Wy2
+int order_cross (void) {
+  int  s, s1, index[];
+  real dist[];
+
+  Sx[snum]  = Wx2[i1];   Sy[snum]    = Wy2[i1];   // Save end
+  ISx[snum] = IWx2[i1];  ISy[snum++] = IWy2[i1];  // -"- and next index
+
+  for (s = 0; s < snum; s++)  // calc. distances
+    dist[s] = (Sx[s] - Sx[0]) * (Sx[s] - Sx[0]) + (Sy[s] - Sy[0]) * (Sy[s] - Sy[0]); // now used as lenght indicator (r*r)
+
+  sort(snum, index, dist);  // sort interceptions
+
+  s1 = 0;                   // filter out multiple interceptions on same point
+  hx[0]  = Sx[index[0]];   hy[0]  = Sy[index[0]];  // Start is first corner Wx1, Wy1
+  Ihx[0] = ISx[index[0]];  Ihy[0] = ISy[index[0]];
+
+  for (s = 1; s < snum; s++)  {
+    if (ISx[index[s]] != Ihx[s1] || ISy[index[s]] != Ihy[s1]) { // not identical to previous value
+      s1++;
+      hx[s1]  = Sx[index[s]];   hy[s1]  = Sy[index[s]];  // Copy interception
+      Ihx[s1] = ISx[index[s]];  Ihy[s1] = ISy[index[s]];
+      }
+    }
+
+  return s1; // return index
+  }
+
+
+// Check point for inside polygon
+// xp, yp: center of point
+// return: 1 = outside polygon, 0 = inside
+int out_poly (real xp, real yp) {
+  int  pref, w, i_f;
+
+  w = 0;
+  while (w < wnum)  {   // For all wires
+    if (px[w] != j)  {  // Not the polygon the edge belongs to ?
+      pref = px[w];     // Current polygon no.
+      i_f = 1;          // default: inside
+      do  {
+        if (i_f)  {  // Not already outside detected ?
+          if ((xp * Cosa[w] + yp * Sina[w] + Pd[w]) < eta_cmp) // Point is outside ?
+            i_f = 0;  // Outside
+          }
+        w++;
+        }  while (pref == px[w] && w < wnum);  // Until next polygon or last wire
+
+      if (i_f)     // Inside polygon?
+        return 0;  // ready
+      }
+    else
+      w++;  // Next wire
+    }
+  return 1;  // Outside polygon
+  }
+
+
+// Check mill wires and perform output
+void check_mill (void)  {
+  int w1, w2, k,
+      xb, yb, xe, ye,  // Saved wire and connection point x,y
+      d[];             // Delete Flag = 1
+
+  // Delete wires with length <= delta
+  for (w1 = 0; w1 < anum; w1++)  {  // For all wires
+    if (abs(IAx1[w1] - IAx2[w1]) <= 1 && abs(IAy1[w1] - IAy2[w1]) <= 1)  {  // Short wire ?
+      d[w1] = 1;  // Set delete flag
+
+      for (w2 = 0; w2 < anum; w2++)  {  // Search for connections of other wires
+        if (w2 != w1)  {                // Not the same wire ?
+          if (IAx1[w2] == IAx1[w1] && IAy1[w2] == IAy1[w1])  {  // Same value ?
+            IAx1[w2] = IAx2[w1];  IAy1[w2] = IAy2[w1];          // Correct value
+            }
+
+          if (IAx2[w2] == IAx1[w1] && IAy2[w2] == IAy1[w1])  {  // Same value ?
+            IAx2[w2] = IAx2[w1];  IAy2[w2] = IAy2[w1];          // Correct value
+            }
+          }
+        }
+      }
+    }
+
+  // Delete double wires and output wires from begin to farest possible end
+  k = -1;  // No saved wire
+  for (w1 = 0; w1 < anum; w1++)  {  // For all wires
+    for (w2 = w1 + 1; w2 < anum; w2++)  {
+      if ((IAx1[w1] == IAx1[w2] && IAy1[w1] == IAy1[w2] && IAx2[w1] == IAx2[w2] && IAy2[w1] == IAy2[w2]) ||
+          (IAx2[w1] == IAx1[w2] && IAy2[w1] == IAy1[w2] && IAx1[w1] == IAx2[w2] && IAy1[w1] == IAy2[w2]))  {
+        d[w1] = 1;  // Set delete flag
+        break;
+        }
+      }
+
+    if (!d[w1])  {         // Wire valid ?
+      if (k != kx[w1])  {  // Next wire ?
+        if (k >= 0)        // Saved wire ?
+          printf("wire (%4.4f %4.4f) (%4.4f %4.4f);\n", u2mm(xb), u2mm(yb), u2mm(xe), u2mm(ye));  // Output wire
+
+        k  = kx[w1];    // Index of new wire
+        xb = IAx1[w1];  // Save begin and end of new wire
+        yb = IAy1[w1];
+        xe = IAx2[w1];
+        ye = IAy2[w1];
+        }
+      else  {
+        if (xe != IAx1[w1] || ye != IAy1[w1])  {  // Curren wire not connected ?
+          printf("wire (%4.4f %4.4f) (%4.4f %4.4f);\n", u2mm(xb), u2mm(yb), u2mm(xe), u2mm(ye));  // Output wire
+
+          xb = IAx1[w1];  // Save begin and end of new wire segment
+          yb = IAy1[w1];
+          xe = IAx2[w1];
+          ye = IAy2[w1];
+          }
+        else  {
+          xe = IAx2[w1];  // Save next possible connection point
+          ye = IAy2[w1];
+          }
+        }
+      }
+    }
+  if (k >= 0)  // Saved wire ?
+    printf("wire (%4.4f %4.4f) (%4.4f %4.4f);\n", u2mm(xb), u2mm(yb), u2mm(xe), u2mm(ye));  // Output wire
+  }
+
+
+// Output milling contur into script file
+void mill (void) {
+  int i,
+      imax;  // Index of last interception
+
+  if (pnum > 1)  {  // More then 1 polygon ?
+    hesse();        // Calculate Hesse form of all wires
+
+    anum = 0;       // No wires processed
+    i1 = 0;
+    for (j = 0; j < pnum; j++)  {           // 1. Polygon 0..n
+      while (px[i1] == j && i1 < wnum)  {   // all corners of 1. Polygon
+        Sx[0]  = Wx1[i1];   Sy[0]  = Wy1[i1];  // Save begin
+        ISx[0] = IWx1[i1];  ISy[0] = IWy1[i1];
+        snum = 1;
+
+        for (i2 = 0; i2 < wnum; i2++)  {
+          if (j != px[i2])
+            cross();  // Calc. interception: i1 is index for 1. edge, i2 is index for 2. edge
+          }
+
+        imax = order_cross();  // Order interceptions
+
+        for (i = 0; i < imax; i++)  {
+          if (out_poly((hx[i] + hx[i+1]) / 2.0, (hy[i] + hy[i+1]) / 2.0))  {  // Out of polygon ?
+            IAx1[anum] = Ihx[i];    IAy1[anum] = Ihy[i];
+            IAx2[anum] = Ihx[i+1];  IAy2[anum] = Ihy[i+1];
+            kx[anum++] = i1;  // Wire index
+            }
+          }
+
+        i1++;  // Next wire
+        }  // end while
+      }  // end for
+
+    check_mill();  // Check mill wires and perform output
+    }
+  else { // only one polygon
+    for (i = 0; i < wnum; i++) {
+      printf("wire (%4.4f %4.4f) (%4.4f %4.4f);\n", Wx1[i], Wy1[i], Wx2[i], Wy2[i]);
+      }
+    }
+  }
+
+
+// Calculate Arc of wire
+// dx, dy  Delta Coordinates
+// return: arc 0 to 2 * PI
+real wire_arc (real dx, real dy)  {
+  if (dx != 0.0)  {                     // Valid atan ?
+    if (dx > 0.0)  {
+      if (dy >= 0.0)                    // Quadrant 1 or 4 ?
+        return atan(dy / dx);           // Quadrant 1
+      else
+        return atan(dy / dx) + 2.0*PI;  // Quadrant 4
+      }
+    else
+      return atan(dy / dx) + PI;        // Quadrant 2 or 3
+    }
+  else  {
+    if (dy >= 0.0)                      // Quadrant 1 or 3 ?
+      return 0.5 * PI;                  // 90 degree
+    else
+      return 1.5 * PI;                  // 270 degree
+    }
+  }
+
+
+// Evaluate a unique pad type
+// shape: shape value of pad
+// return: unique code for pad, via, smd type
+int eval_pad_type (int shape)  {
+  switch (shape)  {
+    case PAD_SHAPE_SQUARE:    // Square
+      return 1;
+/*
+    case PAD_SHAPE_XLONGOCT:  // X long
+      return 2;
+
+    case PAD_SHAPE_YLONGOCT:  // Y long
+      return 3;
+*/
+    case PAD_SHAPE_ROUND:     // round
+      return 4;
+
+    default:                  // octagon, etc.
+      return 10;
+    }
+  }
+
+
+// Evaluate a unique via type
+// shape: shape value of via
+// return: unique code for pad, via, smd type
+int eval_via_type (int shape)  {
+  switch (shape)  {
+    case VIA_SHAPE_SQUARE:  // Square
+      return 1;
+
+    case VIA_SHAPE_ROUND:   // round
+      return 4;
+
+    default:                // octagon, etc.
+      return 10;
+    }
+  }
+
+
+// Draw pad, via or smd and copy it into W.. area
+// x_i, y_i:         center in integer
+// width_x, width_y: width in x and y direction in integer
+//                   used dependend on type of shape
+// shape:            unique shape type
+void draw_shape (int x_i, int y_i, int width_x, int width_y, int shape)  {
+  int  i;
+  real x, y,                        // Coordinates in mm
+       lng_of, sht_of, e_of, g_of;  // Offset long, short corner, extended offsets
+
+  x = u2mm(x_i);  // Convert coordinates
+  y = u2mm(y_i);
+
+  switch (shape)  {
+    case 1:  // Square
+      lng_of = u2mm(width_x) / 2.0 + milldist;  // long corner offset for pad
+
+      // Calc corners of the 8 wire polygon
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 4] = Wx2[wnum - 1]; Wy1[wnum - 4] = Wy2[wnum - 1];
+      for (i = 0; i <= 2; i++) {
+        Wx1[wnum - 3 + i] = Wx2[wnum - 4 + i]; Wy1[wnum - 3 + i] = Wy2[wnum - 4 + i];
+        }
+      break;
+
+    case 2:  // X long
+      lng_of = u2mm(width_x) / 4.0 + milldist;  // long corner offset for pad, page relation 2:1
+      sht_of = lng_of * tan_pi_8;               // short corner offset for pad
+      e_of   = u2mm(width_x) / 4.0;
+
+      // Calc corners of the 8 wire polygon
+      Wx2[wnum] = x - sht_of - e_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of - e_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of - e_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - sht_of - e_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of + e_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of + e_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of + e_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of + e_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 8] = Wx2[wnum - 1]; Wy1[wnum - 8] = Wy2[wnum - 1];
+      for (i = 0; i <= 6; i++) {
+        Wx1[wnum - 7 + i] = Wx2[wnum - 8 + i]; Wy1[wnum - 7 + i] = Wy2[wnum - 8 + i];
+        }
+      break;
+
+    case 3:  // Y long
+      lng_of = u2mm(width_y) / 4.0 + milldist;  // long corner offset for pad, page relation 2:1
+      sht_of = lng_of * tan_pi_8;               // short corner offset for pad
+      e_of   = u2mm(width_y) / 4.0;
+
+      // Calc corners of the 8 wire polygon
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y + lng_of + e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y + sht_of + e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y - sht_of - e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y - lng_of - e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y - lng_of - e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y - sht_of - e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y + sht_of + e_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y + lng_of + e_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 8] = Wx2[wnum - 1]; Wy1[wnum - 8] = Wy2[wnum - 1];
+      for (i = 0; i <= 6; i++) {
+        Wx1[wnum - 7 + i] = Wx2[wnum - 8 + i]; Wy1[wnum - 7 + i] = Wy2[wnum - 8 + i];
+        }
+      break;
+
+    case 4:  // round
+      lng_of = u2mm(width_x) / 2.0 + milldist;  // long corner offset for pad
+      sht_of = lng_of * tan_pi_16;              // short corner offset for pad
+      e_of   = sin_pi_3_16 / cos_pi_16 * lng_of;
+      g_of   = cos_pi_3_16 / cos_pi_16 * lng_of;
+
+      // Calc corners of the 16 wire polygon
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - e_of;   Wy2[wnum] = y + g_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - g_of;   Wy2[wnum] = y + e_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - g_of;   Wy2[wnum] = y - e_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - e_of;   Wy2[wnum] = y - g_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + e_of;   Wy2[wnum] = y - g_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + g_of;   Wy2[wnum] = y - e_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + g_of;   Wy2[wnum] = y + e_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + e_of;   Wy2[wnum] = y + g_of;   px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 16] = Wx2[wnum - 1]; Wy1[wnum - 16] = Wy2[wnum - 1];
+      for (i = 0; i <= 14; i++) {
+        Wx1[wnum - 15 + i] = Wx2[wnum - 16 + i]; Wy1[wnum - 15 + i] = Wy2[wnum - 16 + i];
+        }
+      break;
+
+    case 5:  // smd
+      lng_of = u2mm(width_x) / 2.0 + milldist;  // Calc diameter dx
+      sht_of = u2mm(width_y) / 2.0 + milldist;  // ... dy
+
+      // Calc corners
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 4] = Wx2[wnum - 1]; Wy1[wnum - 4] = Wy2[wnum - 1];
+      for (i = 0; i <= 2; i++) {
+        Wx1[wnum - 3 + i] = Wx2[wnum - 4 + i]; Wy1[wnum - 3 + i] = Wy2[wnum - 4 + i];
+        }
+      break;
+
+    default:  // octagon, etc.
+      lng_of = u2mm(width_x) / 2.0 + milldist;  // long corner offset for pad
+      sht_of = lng_of * tan_pi_8;               // short corner offset for pad
+
+      // Calc corners of the 8 wire polygon
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x - sht_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y - lng_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y - sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + lng_of; Wy2[wnum] = y + sht_of; px[wnum] = pnum; wnum++;
+      Wx2[wnum] = x + sht_of; Wy2[wnum] = y + lng_of; px[wnum] = pnum; wnum++;
+      Wx1[wnum - 8] = Wx2[wnum - 1]; Wy1[wnum - 8] = Wy2[wnum - 1];
+      for (i = 0; i <= 6; i++) {
+        Wx1[wnum - 7 + i] = Wx2[wnum - 8 + i]; Wy1[wnum - 7 + i] = Wy2[wnum - 8 + i];
+        }
+      break;
+    }
+  pnum++;  // Next Polygon
+  }
+
+
+// Do mills for layer
+// layer_nr: top layer 1 or bottom layer 16
+void mill_layer (int layer_nr) {
+  int i, v, vnum,    // Via index and max. number
+      g;             // index
+                     // Vias and pads of a signal
+  int Vx[],  Vy[],   // Center x,y
+      Vwx[], Vwy[],  // Width x,y
+      Vtyp[];        // Type 0 = no, 1 = Smd, 2 = Pad square, 3 ...
+
+  real alfa,            // Arc of wire 0 to 2*PI
+       dx, dy,          // Delta x and y
+       x1, y1, x2, y2,  // offset center x,y1
+       width;           // Width of wire
+
+  if (layer_nr == 1 || layer_nr == 16) {
+    printf("display %d;\nchange layer %d;\n", milling_layer, milling_layer);
+  }
+  else {
+    dlgMessageBox("Invalid layer");
+    exit(0);
+  }
+
+  // Set grid and wire style, width 0 !a must!
+  printf("grid mm 0.0001 dots off;\nset wire_bend 2;\nchange style continuous;\nchange width 0.0;\n");
+  printf("set undo_log off;\n");
+  board(B)  {  // collect objects as polygons in array
+    B.signals(S) {
+      if (select_signal(S.name))  {  // Select signal to mill
+        wnum = 0; pnum = 0; vnum = 0;
+        S.wires(W) {          // all wires of a signal
+          if (W.layer == layer_nr) {
+            x1 = u2mm(W.x1);  // Offset center x,y 1
+            y1 = u2mm(W.y1);
+            x2 = u2mm(W.x2);  // Offset center x,y 2
+            y2 = u2mm(W.y2);
+
+            alfa = wire_arc(x2 - x1, y2 - y1);  // Angle 0 - 2*PI seen from begin
+
+            width = u2mm(W.width) / 2.0 + milldist; // dx
+            dx = sin(alfa) * width;  // Delta x,y
+            dy = cos(alfa) * width;
+
+            // Calculate corners of 4 wires
+            Wx2[wnum] = x1 - dx; Wy2[wnum] = y1 + dy; px[wnum] = pnum; wnum++;
+            Wx2[wnum] = x1 + dx; Wy2[wnum] = y1 - dy; px[wnum] = pnum; wnum++;
+            Wx2[wnum] = x2 + dx; Wy2[wnum] = y2 - dy; px[wnum] = pnum; wnum++;
+            Wx2[wnum] = x2 - dx; Wy2[wnum] = y2 + dy; px[wnum] = pnum; wnum++;
+            Wx1[wnum - 4] = Wx2[wnum - 1]; Wy1[wnum - 4] = Wy2[wnum - 1];
+            for (i = 0; i <= 2; i++) {
+              Wx1[wnum - 3 + i] = Wx2[wnum - 4 + i]; Wy1[wnum - 3 + i] = Wy2[wnum - 4 + i];
+              }
+            pnum++;  // Next polygon
+
+            // Polygons for begin and end
+            Vx[vnum]   = W.x1;     Vy[vnum]  = W.y1;  // Save begin
+            Vwx[vnum]  = W.width;  Vwy[vnum] = Vwx[vnum];
+            Vtyp[vnum] = 10;  // Octagon
+            vnum++;
+
+            Vx[vnum]   = W.x2;    Vy[vnum]  = W.y2;  // Save end
+            Vwx[vnum]  = W.width; Vwy[vnum] = Vwx[vnum];
+            Vtyp[vnum] = 10;  // Octagon
+            vnum++;
+            }
+          }
+
+        S.contactrefs(C) {       // all pads of a signal
+          if (C.contact.pad) {
+            Vx[vnum]   = C.contact.pad.x;   // Save values
+            Vy[vnum]   = C.contact.pad.y;
+            Vtyp[vnum] = eval_pad_type(C.contact.pad.shape[layer_nr]);
+
+            switch (C.contact.pad.shape[layer_nr])  {
+/*              case PAD_SHAPE_XLONGOCT:  // X long
+                Vwy[vnum] = C.contact.pad.diameter[layer_nr];
+                Vwx[vnum] = Vwy[vnum] * 2.0;
+                break;
+
+              case PAD_SHAPE_YLONGOCT:  // Y long
+                Vwx[vnum] = C.contact.pad.diameter[layer_nr];
+                Vwy[vnum] = Vwx[vnum] * 2.0;
+                break;
+*/
+              default:  // square, round, octagon, etc.
+                Vwx[vnum] = C.contact.pad.diameter[layer_nr];
+                Vwy[vnum] = Vwx[vnum];
+                break;
+              }
+            vnum++;  // Next pad
+            }
+
+          if (C.contact.smd) {   // all smds of a signal
+            if (C.contact.smd.layer == layer_nr) {
+              Vx[vnum]   = C.contact.smd.x;   // Save values
+              Vy[vnum]   = C.contact.smd.y;
+              Vwx[vnum]  = C.contact.smd.dx;
+              Vwy[vnum]  = C.contact.smd.dy;
+              Vtyp[vnum] = 5;  // Typ Smd
+              vnum++;  // Next pad
+              }
+            }
+          }
+
+        S.vias(V) {  // all vias of a signal
+          Vx[vnum]   = V.x;   // Save values
+          Vy[vnum]   = V.y;
+          Vwx[vnum]  = V.diameter[layer_nr];
+          Vwy[vnum]  = Vwx[vnum];
+          Vtyp[vnum] = eval_via_type(V.shape[layer_nr]);
+          vnum++;  // Next pad
+          }
+
+        for (v = 0; v < vnum; v++)  {  // For all Vias, Smd, Pads
+          if (Vtyp[v] != 0)  {  // Valid entry ?
+            for (g = v + 1; g < vnum; g++)  {  // Search other vias
+              if (Vtyp[g] != 0  &&
+                  abs(Vx[v] - Vx[g]) == 0 &&
+                  abs(Vy[v] - Vy[g]) == 0)  {  // New pad on same center ?
+                if (Vwx[v] < Vwx[g] &&
+                    Vwy[v] < Vwy[g])  {  // New greater width ?
+                  Vwx[v]  = Vwx[g];      // Copy new values
+                  Vwy[v]  = Vwy[g];
+                  Vtyp[v] = Vtyp[g];
+                  }
+                Vtyp[g] = 0;  // Allways ready
+                }
+              }
+            draw_shape(Vx[v], Vy[v], Vwx[v], Vwy[v], Vtyp[v]);  // Calc corners
+            Vtyp[v] = 0;  // Ready
+            }
+          }
+// pnum = 1;  // use for test only
+        mill();
+        }
+      }
+
+    // ---------------- mill isolated contacts ----------------------------
+    B.elements(E) {
+      E.package.contacts(C) {
+        wnum = 0; pnum = 0;
+        if (C.pad) {
+          if (!C.pad.signal) {
+            draw_shape(C.pad.x, C.pad.y, C.pad.diameter[layer_nr], C.pad.diameter[layer_nr], eval_pad_type(C.pad.shape[layer_nr]));  // Calc corners
+
+            mill();
+            }
+          }
+
+        if (C.smd) {
+          if (!C.smd.signal) {
+            if (C.smd.layer == layer_nr) {
+              draw_shape(C.smd.x, C.smd.y, C.smd.dx, C.smd.dy, 5);  // Calc corners
+
+              mill();
+              }
+            }
+          }
+        }
+      }
+    }
+  printf("optimize;\nset undo_log on;\n");
+  }
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+// mill_me4.ulp by stef@giaf.de
+// inspired by Jörg Becker's drill_mill.ulp
+//
+// this ulp makes sort of points and circles from every hole on a board. 
+// Holes smaller than mill diameter become points, holes bigger than mill diameter
+// become circles with diameters reduced by the diameter of the milling tool. 
+// drill.ulp can be used to drill different sizes of holes with only one milling tool.
+//
+// Package Holes included
+//----------------------------------------------------------------------------------------------
+// 1. Relax. 
+//
+// 2. Adjust the parameters below to your needs.
+//
+// 3. Load your pc board into the layout editor.
+//    Make sure, you have run a DRC with min. distance of milling diameter between signals.
+//    Only objects belonging to signals (except polygons) are taken for milling shape.
+//
+// 4. Run this ULP (RUN 4DRILL.ULP).
+//
+// 5. Execute script files eagle/scr/4DRILL.SCR 
+//
+// 6. Generate milling files for drilling with CAM Processor
+//    (only drillmill layer activated).
+//    Choose HPGL driver if your CNC machine understands this format.
+//    In case your CNC machine understands a proprietary format, define a new driver
+//    in EAGLE.DEF or contact CadSoft <support@cadsoft.de> for help.
+//--------------------------------------------------------------------------------------------
+
+void milldrill(void) {
+  printf("display %d;\nchange layer %d;\n", milldrill_layer, milldrill_layer);
+  printf("change style continuous;\nchange width %2.2f;\n", wire_width);
+  printf("set undo_log off;\n");
+
+
+board(B) { 
+
+  // Drilling CONTACT-PADS and Holes of the Elements
+  B.elements(E) { 
+    E.package.contacts(C) { 
+        if (C.pad) 
+
+         if (!millholes || C.pad.drill <= milldia * 10000)
+         printf("wire (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(C.pad.x)-wire_width/10,u2mm( C.pad.y), u2mm(C.pad.x)+wire_width/10,u2mm( C.pad.y));
+         else
+         printf("circle (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(C.pad.x),u2mm( C.pad.y), u2mm(C.pad.x)+u2mm(C.pad.drill)/2-milldia/2,u2mm( C.pad.y)); 
+
+        } // C
+
+  // Drilling Element- HOLES
+   E.package.holes(H) { 
+
+         if (!millholes || H.drill <= milldia * 10000)
+         printf("wire (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(H.x)-wire_width/10,u2mm( H.y), u2mm(H.x)+wire_width/10,u2mm( H.y));
+         else
+         printf("circle (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(H.x),u2mm( H.y), u2mm(H.x)+u2mm(H.drill)/2-milldia/2,u2mm( H.y)); 
+
+    } // H
+
+    } // E
+
+
+   // Drilling VIAS
+   B.signals(S) { 
+     S.vias(V) { 
+
+         if (!millholes || V.drill <= milldia * 10000)
+         printf("wire (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(V.x)-wire_width/10,u2mm( V.y), u2mm(V.x)+wire_width/10,u2mm( V.y));
+         else
+         printf("circle (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(V.x),u2mm( V.y), u2mm(V.x)+u2mm(V.drill)/2-milldia/2,u2mm( V.y)); 
+
+        } //V
+    } //S
+ 
+
+  // Drilling HOLES
+   B.holes(H) { 
+
+         if (!millholes || H.drill <= milldia * 10000)
+         printf("wire (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(H.x)-wire_width/10,u2mm( H.y), u2mm(H.x)+wire_width/10,u2mm( H.y));
+         else
+         printf("circle (%4.3f %4.3f) (%4.3f %4.3f);\n", u2mm(H.x),u2mm( H.y), u2mm(H.x)+u2mm(H.drill)/2-milldia/2,u2mm( H.y)); 
+
+    } // H
+
+  } //B
+
+        printf("optimize;\ngrid last\nset undo_log on;\n");
+
+  } // output
+
+
+//////////////////////////////////////////////////////////////////////////////////////////
+//
+// main entry point
+//
+//////////////////////////////////////////////////////////////////////////////////////////
+
+milldist = milldia / 2.0 + millspace;  // Calculate distance mill to wire
+
+output(millbot_scr, "wt") {  // Mill Bottom/Top layer
+  mill_layer(layer);
+}
+
+output(milldrill_scr, "wt") {  // Drill/mill the holes
+  milldrill();
+}
+
+
+// run the scripts
+exit(";SCR '" + millbot_scr + "';SCR '" + milldrill_scr + "';\n");
+

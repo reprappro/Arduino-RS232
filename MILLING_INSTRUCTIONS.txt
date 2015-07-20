@@ -1,0 +1,62 @@
+Instructions for PCB milling on the Roland MDX-20 Modela mill, using the custom serial driver board.
+--Written 20-07-2015 by Oliver Kesterton
+
+
+-------To mill PCB once machine instruction file produced:------------
+
+1-Copy the milling file to the micro SD card, and rename it to "file.txt"
+2-Plug everthing in (Arduino Mega pin mapping):
+	Black = GND
+	Orange = +5V
+	Blue = RX = 19
+	Green = TX = 18
+	Red = CTS = 2
+	Brown = RTS = 3
+
+	If connections have come out of PCB, order is:
+		Blue
+		Green
+		Brown
+		Red
+		Orange
+		Black
+
+3-Open serial monitor via Arduino software
+4-Switch the mill on at the wall, and press the standby button. The power LED should light up
+5-Press the 'View' button. The mill should move to the bottom left position (0,0 xy position). The tool z position will not change.
+6a-Press 'Down' for a short time, so that the tool moves down a bit, but is still well above the work surface
+	RUN THE CODE FOR THE FIRST TIME IN THIS STATE, IN ORDER TO CHECK IT IS DOING WHAT IT SHOULD. ONCE SATISFIED IT IS
+	RETURN TO INSTRUCTION 6b.
+
+6b-Press 'Down' until the tool is just above the PCB, then adjust the tool until it is just touching the work surface.
+	(unscrew the grub screw and let it drop out)
+	-For files produced using the eagle add on, with no changes made to the file, the z tool-height is set wrong.
+	Instead, lower the tool into the PCB slightly, to the desired cutting depth (about 3 presses of 'Down' is usually plenty).
+	Note that the tool will move up before its first cut.
+7-The Arduino serial monitor should say "Type G to begin". If not, press the reset button.
+	Type 'G' (note, it is case sensitive) in the serial monitor and click send. The machine should begin cutting.
+	Watch the tool closely initially. If it is doing weird things, press 'View' to pause the cut.
+	Pressing 'View' again will return the tool to where it was
+8-Once complete, the tool will return to the 0,0 position. Press 'View' to return the tool to its resting position, and extract the board.
+
+
+To cancel a print, press 'View'. Once the tool has moved to its idle position, press the reset button on the Arduino and press the 
+	'Up' and 'Down' buttons together to delete remaining commands from the buffer. The view LED will flash whilst this happens
+	and will stop flashing once the program has been deleted.
+
+--------------------------------------------------------------------------------------
+
+--To generate milling script (RML-1 files)--------------------------------------------
+
+Option 1 (easiest): CopperCAM (http://www.galaad.net/coppercam-eng.html)
+	The program will open Gerber files and output RML-1 script.
+	The program is fairly intutitive with good documentation. The generated RML-1 files work straight from the program.
+	However, the program requires an 80 Euro licence.
+
+Option 2: Eagle and a script to output RML-1 file (Detailed instructions here: http://mlab.taik.fi/paja/?p=1874)
+	-In your Eagle install, change replace the eagle.def file with the one included in the "Eagle scripts" folder
+	-In Eagle, go File>Run ULP and naviagate to fablab-mill-n-drill.ulp. 
+		This should make some milling paths on layers 45 and 46 in Eagle
+	-In the Eagle CAM processor, load the job fablab-mill-n-drill.CAM
+		In each tab, change the X offset to be the width of the board, or greater. A Y offset is optional.
+	-Click Process Job, and the RML-1 files should appear in the project directory.
